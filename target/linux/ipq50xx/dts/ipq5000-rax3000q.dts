@@ -100,6 +100,14 @@
 		};
 	};
 
+	// 👉 新增：为 GPIO 26 声明引脚复用（作为普通 GPIO 使用）
+	switch_reset_pins: switch_reset_pins {
+		pins = "gpio26";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+	};
+
 	leds_pins: leds_pins {
 		led_status_red {
 			pins = "gpio24";
@@ -247,7 +255,10 @@
 			compatible = "qcom,ess-switch-qca83xx";
 			device_id = <1>;
 
-			reset_gpio = <26>;
+			// 👉 替换：删掉不规范的 reset_gpio = <26>; 使用标准属性
+			pinctrl-0 = <&switch_reset_pins>;
+			pinctrl-names = "default";
+			reset-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
 
 			switch_access_mode = "mdio";
 			mdio-bus = <&mdio1>;
@@ -357,7 +368,8 @@
 	pinctrl-names = "default";
 	status = "ok";
 
-	reset-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
+	// 👉 删除：这行跟 ess-switch1 抢资源了，删掉它，让交换机驱动去复位
+	// reset-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
 
 	// QCA8337 Phy0 -> WAN
 	ethernet-phy@0 {
