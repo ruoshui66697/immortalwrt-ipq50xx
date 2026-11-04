@@ -1,0 +1,20 @@
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4386,6 +4386,15 @@ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 	else
+ 		flags |= WMI_KEY_GROUP;
+ 
++	/* 
++	 * Fix for ath11k GTK rekey race condition.
++	 * In STA mode, bypass the DISABLE_KEY command for group keys to prevent
++	 * firmware race conditions that cause packet drops/handshake timeouts.
++	 */
++	if (cmd == DISABLE_KEY && (flags & WMI_KEY_GROUP) &&
++	    vif->type == NL80211_IFTYPE_STATION) {
++		ath11k_dbg(ar->ab, ATH11K_DBG_MAC, "Bypassing GTK DISABLE_KEY in STA mode\n");
++		goto exit;
++	}
++
+ 	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
+ 	if (ret) {
+ 		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
