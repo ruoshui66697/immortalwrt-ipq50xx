@@ -9,7 +9,7 @@
 +	 * In STA mode, bypass the DISABLE_KEY command for group keys to prevent
 +	 * firmware race conditions that cause packet drops/handshake timeouts.
 +	 */
-+	if (cmd == DISABLE_KEY && (flags & WMI_KEY_GROUP) &&
++	if (cmd == DISABLE_KEY && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
 +	    vif->type == NL80211_IFTYPE_STATION) {
 +		ath11k_dbg(ar->ab, ATH11K_DBG_MAC, "Bypassing GTK DISABLE_KEY in STA mode\n");
 +		goto exit;
