@@ -1,0 +1,11 @@
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -5040,7 +5040,7 @@
+ 		case RX_ENC_VHT:
+-			if (WARN_ONCE(status->rate_idx > 9 ||
++			if (WARN_ONCE(status->rate_idx > 11 ||
+ 				      !status->nss || status->nss > 8,
+ 				      "Rate marked as a VHT rate but data is invalid: MCS: %d, NSS: %d\n",
+ 				      status->rate_idx, status->nss))
+ 				goto drop;
+ 			break;
