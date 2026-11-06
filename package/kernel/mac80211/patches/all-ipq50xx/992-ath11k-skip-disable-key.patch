@@ -1,0 +1,66 @@
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -543,6 +543,8 @@ struct ath11k_vif {
+ 	u32 key_cipher;
+ 	struct ath11k_peer *bss_peer;
+ 	struct ieee80211_key_conf *key_conf;
++	u32 num_stations;
++	bool reinstall_group_keys;
+ };
+ 
+ struct ath11k_sta {
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4215,6 +4215,36 @@ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 	}
+ 
++static int ath11k_set_group_keys(struct ath11k_vif *arvif)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	const u8 *addr = arvif->bssid;
++	int i, ret, first_errno = 0;
++	struct ath11k_peer *peer;
++
++	spin_lock_bh(&ab->base_lock);
++	peer = ath11k_peer_find(ab, arvif->vdev_id, addr);
++	spin_unlock_bh(&ab->base_lock);
++
++	if (!peer)
++		return -ENOENT;
++
++	for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
++		struct ieee80211_key_conf *key = peer->keys[i];
++
++		if (!key || (key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
++			continue;
++
++		ret = ath11k_install_key(arvif, key, SET_KEY, addr, WMI_KEY_GROUP);
++		if (ret < 0 && first_errno == 0)
++			first_errno = ret;
++
++		if (ret < 0)
++			ath11k_warn(ab, "failed to set group key of idx %d for vdev %d: %d\n", i, arvif->vdev_id, ret);
++	}
++
++	return first_errno;
++}
++
+ 	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
+ 	if (ret) {
+ 		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
+@@ -4229,6 +4259,16 @@ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 		goto exit;
+ 	}
+ 
++	/* 当第一个站点接入，且标记了需重装群组密钥时执行 */
++	if (arvif->num_stations == 1 && arvif->reinstall_group_keys) {
++		ret = ath11k_set_group_keys(arvif);
++		if (ret)
++			goto exit;
++		arvif->reinstall_group_keys = false;
++	}
++
+ 	/* VLAN ID is updated non-zero only for AP_VLAN vif */
+ 	if (key->vlan_id && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
+ 	    ap_vlan_arvif) {
