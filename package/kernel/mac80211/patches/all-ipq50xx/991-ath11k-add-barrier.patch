@@ -1,0 +1,9 @@
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -2093,6 +2093,8 @@
+ 	while (budget) {
+ 		rx_desc = ath11k_hal_srng_dst_get_next_entry(ab, srng);
++		/* PATCH_ATH11K_MEM_BARRIER: 解决 AArch64 架构下的 RX 描述符数据竞争 */
++		dma_rmb();
+ 		if (!rx_desc)
+ 			break;
