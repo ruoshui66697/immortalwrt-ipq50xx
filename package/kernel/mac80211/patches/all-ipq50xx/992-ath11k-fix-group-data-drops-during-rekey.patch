@@ -1,17 +1,17 @@
 --- a/drivers/net/wireless/ath/ath11k/core.h
 +++ b/drivers/net/wireless/ath/ath11k/core.h
-@@ -311,6 +311,8 @@ struct ath11k_vif {
+@@ -301,6 +301,8 @@ struct ath11k_vif {
  	struct ath11k *ar;
  	struct ieee80211_vif *vif;
  
-+	u32 num_stations;
-+	bool reinstall_group_keys;
++	u32 num_stations;           /* 每BSS站点计数器 */
++	bool reinstall_group_keys;  /* 标志位：是否需要重装GTK */
+ 
  	u16 tx_seq_no;
  	struct wmi_wmm_params_all_arg wmm_params;
- 	struct list_head list;
 --- a/drivers/net/wireless/ath/ath11k/mac.c
 +++ b/drivers/net/wireless/ath/ath11k/mac.c
-@@ -4204,6 +4204,40 @@ static int ath11k_clear_peer_keys(struct
+@@ -4198,6 +4198,40 @@ static int ath11k_clear_peer_keys(struct
  	return first_errno;
  }
  
@@ -52,15 +52,15 @@
  static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
  				 struct ieee80211_vif *vif, struct ieee80211_sta *sta,
  				 struct ieee80211_key_conf *key)
-@@ -4212,6 +4246,7 @@ static int ath11k_mac_op_set_key(struct
+@@ -4206,6 +4240,7 @@ static int ath11k_mac_op_set_key(struct
+ 	struct ath11k_vif *arvif = ath11k_vif_to_arvif(vif);
  	struct ath11k_peer *peer;
  	struct ath11k_sta *arsta;
++	bool is_ap_with_no_sta = false;
  	const u8 *peer_addr;
-+	bool is_ap_with_no_sta;
  	int ret = 0;
  	u32 flags = 0;
- 	unsigned long time_left;
-@@ -4220,16 +4255,68 @@ static int ath11k_mac_op_set_key(struct
+@@ -4220,13 +4255,68 @@ static int ath11k_mac_op_set_key(struct
  	else
  		flags |= WMI_KEY_GROUP;
  
@@ -68,42 +68,28 @@
 -	if (ret) {
 -		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
 -		goto exit;
--	}
-+	ath11k_dbg(ar->ab, ATH11K_DBG_MAC,
-+		   "%s for peer %pM on vdev %d flags 0x%X, type = %d, num_sta %d\n",
-+		   cmd == SET_KEY ? "SET_KEY" : "DEL_KEY", peer_addr, arvif->vdev_id,
-+		   flags, arvif->vdev_type, arvif->num_stations);
- 
--	ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
--	if (ret) {
--		ath11k_warn(ab, "failed to offload PN replay detection %d\n", ret);
--		goto exit;
 +	/*
-+	 * Allow group key clearing only in AP mode when no stations are
-+	 * associated. Skip group key clear in STA mode to avoid rekey timeout
-+	 * caused by firmware race.
++	 * 解决 GTK 重密钥时的固件死锁与丢包问题：
++	 * 上游 mac80211 在重密钥时会下发 DISABLE_KEY + SET_KEY。
++	 * STA模式下，禁用 DISABLE_KEY 让 SET_KEY 直接覆盖，避免死锁。
 +	 */
 +	if (cmd == DISABLE_KEY && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE)) {
-+		/* STA mode: Skip DISABLE_KEY, let the next SET_KEY cover it directly */
++		/* STA 模式：直接跳过删除，由后续 SET_KEY 覆盖 */
 +		if (vif->type == NL80211_IFTYPE_STATION) {
-+			ath11k_dbg(ar->ab, ATH11K_DBG_MAC,
-+				   "skip disable gtk in STA mode to avoid rekey race vdev %d\n",
-+				   arvif->vdev_id);
++			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in STA mode for rekey vdev %d\n", arvif->vdev_id);
 +			return 0;
 +		}
 +
-+		/* AP mode: Only allow clear when no stations are connected */
++		/* AP 模式：仅当没有站点连接时允许清除 */
 +		if (vif->type == NL80211_IFTYPE_AP && !arvif->num_stations) {
 +			is_ap_with_no_sta = true;
 +		} else {
-+			ath11k_dbg(ar->ab, ATH11K_DBG_MAC,
-+				   "skip disable gtk in AP mode vdev %d\n",
-+				   arvif->vdev_id);
++			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in AP mode vdev %d\n", arvif->vdev_id);
 +			return 0;
 +		}
 +	}
 +
-+	/* Install key (Directly overwrite in STA mode due to above skip) */
++	/* 执行密钥安装（STA模式下此处会直接覆盖旧GTK） */
 +	if ((flags & WMI_KEY_PAIRWISE) || cmd == SET_KEY || is_ap_with_no_sta) {
 +		ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
 +		if (ret) {
@@ -113,37 +99,60 @@
 +
 +		ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
 +		if (ret) {
-+			ath11k_warn(ab, "failed to offload PN replay detection %d\n",
-+				    ret);
++			ath11k_warn(ab, "failed to offload PN replay detection %d\n", ret);
 +			goto exit;
 +		}
 +
++		/* AP模式下无站连接时标记重装，防止固件状态机异常 */
 +		if ((flags & WMI_KEY_GROUP) && cmd == SET_KEY && is_ap_with_no_sta)
 +			arvif->reinstall_group_keys = true;
  	}
  
- 	/* VLAN ID is updated non-zero only for AP_VLAN vif */
-@@ -5228,6 +5315,7 @@ static int ath11k_mac_inc_num_stations(s
+-	ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
+-	if (ret) {
+-		ath11k_warn(ab, "failed to offload PN replay detection %d\n", ret);
+-		goto exit;
++	/* VLAN ID 仅在 AP_VLAN 模式下为非零 */
++	if (vif->type == NL80211_IFTYPE_AP_VLAN && vif->u.mvu.vlan_id) {
++		u16 vlan_id = vif->u.mvu.vlan_id;
++		u16 vdev_vlan_id;
++
++		if (!arsta ||
++		    ath11k_peer_get_vdev_vlan(ar, arvif->vdev_id, &vdev_vlan_id)) {
++			ath11k_warn(ab, "failed to get vdev vlan id for vdev %d, peer %pM\n",
++				    arvif->vdev_id, peer_addr);
++			goto exit;
++		}
++
++		if (vdev_vlan_id != vlan_id) {
++			ath11k_warn(ab, "vdev vlan id %d mismatch with peer vlan id %d\n",
++				    vdev_vlan_id, vlan_id);
++			goto exit;
++		}
+ 	}
+ 
+ 	ath11k_dbg(ab, ATH11K_DBG_MAC,
+@@ -5228,6 +5318,7 @@ static int ath11k_mac_inc_num_stations(s
  		return -ENOBUFS;
  
  	ar->num_stations++;
-+	arvif->num_stations++;
++	arvif->num_stations++; /* 同步递增每BSS站点计数器 */
  
  	return 0;
  }
-@@ -5243,6 +5331,7 @@ static void ath11k_mac_dec_num_stations(
+@@ -5243,6 +5334,7 @@ static void ath11k_mac_dec_num_stations(
  		return;
  
  	ar->num_stations--;
-+	arvif->num_stations--;
++	arvif->num_stations--; /* 同步递减每BSS站点计数器 */
  }
  
- int ath11k_mac_ap_ps_recalc(struct ath11k *ar)
-@@ -5294,6 +5383,19 @@ static int ath11k_mac_station_add(struct
+ static u32 ath11k_mac_ieee80211_sta_bw_to_wmi(struct ath11k *ar,
+@@ -5286,6 +5378,19 @@ static int ath11k_mac_station_add(struct
  		goto exit;
  	}
  
-+	/* Reinstall group keys when first station connects (AP mode recovery) */
++	/* 首个站点连接时重装GTK，防止固件在清除期间发生竞态 */
 +	if (arvif->num_stations == 1 && arvif->reinstall_group_keys) {
 +		ath11k_dbg(ab, ATH11K_DBG_MAC, "set group keys on 1st station add for vdev %d\n",
 +			   arvif->vdev_id);
@@ -153,8 +162,11 @@
 +		arvif->reinstall_group_keys = false;
 +	}
 +
-+	/* Initialize station rx stats */
 +	arsta->rx_stats = kzalloc(sizeof(*arsta->rx_stats), GFP_KERNEL);
++	if (!arsta->rx_stats) {
++		ret = -ENOMEM;
++		goto dec_num_station;
++	}
 +
  	arsta->rx_stats = kzalloc(sizeof(*arsta->rx_stats), GFP_KERNEL);
  	if (!arsta->rx_stats) {
