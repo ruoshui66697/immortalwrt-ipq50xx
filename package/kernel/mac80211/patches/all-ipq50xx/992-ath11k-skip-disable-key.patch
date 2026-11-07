@@ -1,0 +1,151 @@
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -310,6 +310,9 @@ struct ath11k_vif {
+ 	struct ath11k *ar;
+ 	struct ieee80211_vif *vif;
+ 
++	u32 num_stations;           /* 每BSS站点计数器 */
++	bool reinstall_group_keys;  /* 标志位：是否需要重装GTK */
++
+ 	u16 tx_seq_no;
+ 	struct wmi_wmm_params_all_arg wmm_params;
+ 	struct list_head list;
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -4105,6 +4105,36 @@
+ 	return 0;
+ }
+ 
++static int ath11k_set_group_keys(struct ath11k_vif *arvif)
++{
++	struct ath11k *ar = arvif->ar;
++	struct ath11k_base *ab = ar->ab;
++	const u8 *addr = arvif->bssid;
++	int i, ret, first_errno = 0;
++	struct ath11k_peer *peer;
++
++	spin_lock_bh(&ab->base_lock);
++	peer = ath11k_peer_find(ab, arvif->vdev_id, addr);
++	spin_unlock_bh(&ab->base_lock);
++
++	if (!peer)
++		return -ENOENT;
++
++	for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
++		struct ieee80211_key_conf *key = peer->keys[i];
++
++		if (!key || (key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
++			continue;
++
++		ret = ath11k_install_key(arvif, key, SET_KEY, addr, WMI_KEY_GROUP);
++		if (ret < 0 && first_errno == 0)
++			first_errno = ret;
++
++		if (ret < 0)
++			ath11k_warn(ab, "failed to set group key of idx %d for vdev %d: %d\n", i, arvif->vdev_id, ret);
++	}
++
++	return first_errno;
++}
++
+ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 				 struct ieee80211_vif *vif, struct ieee80211_sta *sta,
+ 				 struct ieee80211_key_conf *key)
+@@ -4115,6 +4145,7 @@
+ 	struct ath11k_sta *arsta = NULL;
+ 	const u8 *peer_addr;
+ 	int ret = 0;
++	bool is_ap_with_no_sta;
+ 	u32 flags = 0;
+ 	unsigned long time_left;
+ 
+@@ -4222,16 +4253,34 @@
+ 		if (!time_left)
+ 			ath11k_warn(ab, "disassociation tx completion timeout %pM\n",
+ 				    sta->addr);
+ 	}
+ 
+-	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
+-	if (ret) {
+-		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
+-		goto exit;
+-	}
+-
+-	ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
+-	if (ret) {
+-		ath11k_warn(ab, "failed to offload PN replay detection %d\n", ret);
+-		goto exit;
+-	}
++	/*
++	 * 解决 GTK 重密钥时的固件死锁与丢包问题：
++	 * 上游 mac80211 在重密钥时会下发 DISABLE_KEY + SET_KEY。
++	 * STA模式下，禁用 DISABLE_KEY 让 SET_KEY 直接覆盖，避免死锁。
++	 */
++	if (cmd == DISABLE_KEY && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE)) {
++		/* STA 模式：直接跳过删除，由后续 SET_KEY 覆盖 */
++		if (vif->type == NL80211_IFTYPE_STATION) {
++			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in STA mode for rekey vdev %d\n", arvif->vdev_id);
++			return 0;
++		}
++
++		/* AP 模式：仅当没有站点连接时允许清除 */
++		if (vif->type == NL80211_IFTYPE_AP && !arvif->num_stations) {
++			is_ap_with_no_sta = true;
++		} else {
++			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in AP mode vdev %d\n", arvif->vdev_id);
++			return 0;
++		}
++	} else {
++		is_ap_with_no_sta = false;
++	}
++
++	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
++	if (ret) {
++		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
++		goto exit;
++	}
++
++	ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
++	if (ret) {
++		ath11k_warn(ab, "failed to offload PN replay detection %d\n", ret);
++		goto exit;
++	}
++
++	if ((flags & WMI_KEY_GROUP) && cmd == SET_KEY && is_ap_with_no_sta)
++		arvif->reinstall_group_keys = true;
+ 
+ 	/* VLAN ID is updated non-zero only for AP_VLAN vif */
+ 	if (key->vlan_id && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
+@@ -5231,6 +5280,7 @@
+ 		return -ENOBUFS;
+ 
+ 	ar->num_stations++;
++	arvif->num_stations++;
+ 
+ 	return 0;
+ }
+@@ -5246,6 +5296,8 @@
+ 		return;
+ 
+ 	ar->num_stations--;
++	if (arvif->num_stations > 0)
++		arvif->num_stations--;
+ }
+ 
+ int ath11k_mac_ap_ps_recalc(struct ath11k *ar)
+@@ -5297,6 +5349,16 @@
+ 		goto exit;
+ 	}
+ 
++	/* 当第一个站点接入，且标记了需重装群组密钥时执行 */
++	if (arvif->num_stations == 1 && arvif->reinstall_group_keys) {
++		ath11k_dbg(ab, ATH11K_DBG_MAC, "set group keys on 1st station add for vdev %d\n", arvif->vdev_id);
++		ret = ath11k_set_group_keys(arvif);
++		if (ret)
++			goto dec_num_station;
++		arvif->reinstall_group_keys = false;
++	}
++
+ 	arsta->rx_stats = kzalloc(sizeof(*arsta->rx_stats), GFP_KERNEL);
+ 	if (!arsta->rx_stats) {
+ 		ret = -ENOMEM;
