@@ -107,6 +107,8 @@
  		goto exit;
  	}
  
+ 	peer_dbg_info = ath11k_mac_sta_level_info(arvif, sta);
++
 +	/* 当第一个站点接入，且标记了需重装群组密钥时执行 */
 +	if (arvif->num_stations == 1 && arvif->reinstall_group_keys) {
 +		ath11k_dbg(ab, ATH11K_DBG_MAC, "set group keys on 1st station add for vdev %d\n", arvif->vdev_id);
