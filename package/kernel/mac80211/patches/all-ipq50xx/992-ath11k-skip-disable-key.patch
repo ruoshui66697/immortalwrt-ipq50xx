@@ -16,6 +16,7 @@
  	return 0;
  }
  
++/* 重新安装所有非Pairwise的群组密钥，用于AP模式重装GTK */
 +static int ath11k_set_group_keys(struct ath11k_vif *arvif)
 +{
 +	struct ath11k *ar = arvif->ar;
@@ -34,6 +35,7 @@
 +	for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
 +		struct ieee80211_key_conf *key = peer->keys[i];
 +
++		/* 跳过空密钥和单播密钥 */
 +		if (!key || (key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
 +			continue;
 +
@@ -51,7 +53,7 @@
  static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
  				 struct ieee80211_vif *vif, struct ieee80211_sta *sta,
  				 struct ieee80211_key_conf *key)
-@@ -4251,7 +4283,27 @@
+@@ -4251,10 +4283,32 @@
  		if (!time_left)
  			ath11k_warn(ab, "disassociation tx completion timeout %pM\n",
  				    sta->addr);
@@ -63,12 +65,14 @@
 +	 * STA模式下，禁用 DISABLE_KEY 让 SET_KEY 直接覆盖，避免死锁。
 +	 */
 +	if (cmd == DISABLE_KEY && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE)) {
++		/* STA 模式：直接跳过删除，由后续 SET_KEY 覆盖 */
 +		if (vif->type == NL80211_IFTYPE_STATION) {
 +			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in STA mode for rekey vdev %d\n", arvif->vdev_id);
 +			ret = 0;
 +			goto exit;
 +		}
 +
++		/* AP 模式：仅当没有站点连接时允许清除，否则跳过并标记等待重装 */
 +		if (vif->type == NL80211_IFTYPE_AP && arvif->num_stations) {
 +			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in AP mode vdev %d\n", arvif->vdev_id);
 +			arvif->reinstall_group_keys = true;
@@ -80,24 +84,26 @@
  	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
  	if (ret) {
  		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
-@@ -5182,6 +5234,7 @@
+ 		goto exit;
+ 	}
+@@ -5231,6 +5283,7 @@
  		return -ENOBUFS;
  
  	ar->num_stations++;
-+	arvif->num_stations++;
++	arvif->num_stations++;	/* 累加此 BSS 的站点计数器 */
  
  	return 0;
  }
-@@ -5197,6 +5250,8 @@
+@@ -5246,6 +5299,8 @@
  		return;
  
  	ar->num_stations--;
-+	if (arvif->num_stations > 0)
++	if (arvif->num_stations > 0)	/* 防止下溢，递减此 BSS 的站点计数器 */
 +		arvif->num_stations--;
  }
  
  static u32 ath11k_mac_ieee80211_sta_bw_to_wmi(struct ath11k *ar,
-@@ -5248,6 +5303,16 @@
+@@ -5297,6 +5352,16 @@
  		goto exit;
  	}
  
