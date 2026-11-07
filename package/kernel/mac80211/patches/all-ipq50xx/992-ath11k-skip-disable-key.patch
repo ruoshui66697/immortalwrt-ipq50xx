@@ -103,7 +103,7 @@
  }
  
  static u32 ath11k_mac_ieee80211_sta_bw_to_wmi(struct ath11k *ar,
-@@ -5297,6 +5356,16 @@
+@@ -5297,7 +5356,18 @@
  		goto exit;
  	}
  
