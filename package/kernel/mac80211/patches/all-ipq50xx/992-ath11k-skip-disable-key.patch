@@ -10,8 +10,6 @@
  	u16 tx_seq_no;
  	struct wmi_wmm_params_all_arg wmm_params;
  	struct list_head list;
-diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
-index 29cbc33..a68ab06 100644
 --- a/drivers/net/wireless/ath/ath11k/mac.c
 +++ b/drivers/net/wireless/ath/ath11k/mac.c
 @@ -4105,6 +4105,38 @@
@@ -53,69 +51,36 @@ index 29cbc33..a68ab06 100644
  static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
  				 struct ieee80211_vif *vif, struct ieee80211_sta *sta,
  				 struct ieee80211_key_conf *key)
-@@ -4115,6 +4145,7 @@
- 	struct ath11k_sta *arsta = NULL;
- 	const u8 *peer_addr;
- 	int ret = 0;
-+	bool is_ap_with_no_sta;
- 	u32 flags = 0;
- 	unsigned long time_left;
- 
-@@ -4223,16 +4254,34 @@
+@@ -4251,7 +4283,26 @@
  		if (!time_left)
  			ath11k_warn(ab, "disassociation tx completion timeout %pM\n",
  				    sta->addr);
  	}
  
--	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
--	if (ret) {
--		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
--		goto exit;
--	}
--
--	ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
--	if (ret) {
--		ath11k_warn(ab, "failed to offload PN replay detection %d\n", ret);
--		goto exit;
--	}
 +	/*
 +	 * 解决 GTK 重密钥时的固件死锁与丢包问题：
 +	 * 上游 mac80211 在重密钥时会下发 DISABLE_KEY + SET_KEY。
 +	 * STA模式下，禁用 DISABLE_KEY 让 SET_KEY 直接覆盖，避免死锁。
 +	 */
 +	if (cmd == DISABLE_KEY && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE)) {
-+		/* STA 模式：直接跳过删除，由后续 SET_KEY 覆盖 */
 +		if (vif->type == NL80211_IFTYPE_STATION) {
 +			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in STA mode for rekey vdev %d\n", arvif->vdev_id);
-+			return 0;
++			ret = 0;
++			goto exit;
 +		}
 +
-+		/* AP 模式：仅当没有站点连接时允许清除 */
-+		if (vif->type == NL80211_IFTYPE_AP && !arvif->num_stations) {
-+			is_ap_with_no_sta = true;
-+		} else {
++		if (vif->type == NL80211_IFTYPE_AP && arvif->num_stations) {
 +			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in AP mode vdev %d\n", arvif->vdev_id);
-+			return 0;
++			arvif->reinstall_group_keys = true;
++			ret = 0;
++			goto exit;
 +		}
-+	} else {
-+		is_ap_with_no_sta = false;
 +	}
 +
-+	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
-+	if (ret) {
-+		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
-+		goto exit;
-+	}
-+
-+	ret = ath11k_dp_peer_rx_pn_replay_config(arvif, peer_addr, cmd, key);
-+	if (ret) {
-+		ath11k_warn(ab, "failed to offload PN replay detection %d\n", ret);
-+		goto exit;
-+	}
- 
- 	/* VLAN ID is updated non-zero only for AP_VLAN vif */
- 	if (key->vlan_id && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
-@@ -5231,6 +5280,7 @@
+ 	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
+ 	if (ret) {
+ 		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
+@@ -5182,6 +5233,7 @@
  		return -ENOBUFS;
  
  	ar->num_stations++;
@@ -123,7 +88,7 @@ index 29cbc33..a68ab06 100644
  
  	return 0;
  }
-@@ -5246,6 +5296,8 @@
+@@ -5197,6 +5249,8 @@
  		return;
  
  	ar->num_stations--;
@@ -132,7 +97,7 @@ index 29cbc33..a68ab06 100644
  }
  
  static u32 ath11k_mac_ieee80211_sta_bw_to_wmi(struct ath11k *ar,
-@@ -5297,6 +5349,15 @@
+@@ -5248,6 +5302,16 @@
  		goto exit;
  	}
  
@@ -140,8 +105,9 @@ index 29cbc33..a68ab06 100644
 +	if (arvif->num_stations == 1 && arvif->reinstall_group_keys) {
 +		ath11k_dbg(ab, ATH11K_DBG_MAC, "set group keys on 1st station add for vdev %d\n", arvif->vdev_id);
 +		ret = ath11k_set_group_keys(arvif);
-+		if (ret)
-+			goto exit;
++		if (ret) {
++			ath11k_warn(ab, "failed to reinstall group keys, ignored\n");
++		}
 +		arvif->reinstall_group_keys = false;
 +	}
 +
