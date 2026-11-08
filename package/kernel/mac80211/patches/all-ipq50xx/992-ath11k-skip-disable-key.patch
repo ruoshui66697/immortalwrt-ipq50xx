@@ -53,7 +53,7 @@
  static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
  				 struct ieee80211_vif *vif, struct ieee80211_sta *sta,
  				 struct ieee80211_key_conf *key)
-@@ -4251,10 +4285,16 @@
+@@ -4251,10 +4285,18 @@
  		if (!time_left)
  			ath11k_warn(ab, "disassociation tx completion timeout %pM\n",
  				    sta->addr);
@@ -72,7 +72,7 @@
  		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
  		goto exit;
  	}
-@@ -5231,6 +5271,7 @@
+@@ -5231,6 +5273,7 @@
  		return -ENOBUFS;
  
  	ar->num_stations++;
@@ -80,7 +80,7 @@
  
  	return 0;
  }
-@@ -5246,6 +5287,8 @@
+@@ -5246,6 +5289,8 @@
  		return;
  
  	ar->num_stations--;
@@ -89,7 +89,7 @@
  }
  
  static u32 ath11k_mac_ieee80211_sta_bw_to_wmi(struct ath11k *ar,
-@@ -5297,7 +5340,18 @@
+@@ -5297,7 +5342,18 @@
  		goto exit;
  	}
  
