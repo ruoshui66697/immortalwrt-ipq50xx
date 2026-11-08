@@ -8,7 +8,7 @@
  	int ret;
  	u64 adjusted_tsf;
  
-@@ -5744,7 +5745,28 @@
+@@ -5744,8 +5745,30 @@
  		if (noack)
  			skb_cb->flags |= ATH11K_SKB_F_NOACK_TID;
  	}
