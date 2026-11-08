@@ -12,24 +12,7 @@
  	struct list_head list;
 --- a/drivers/net/wireless/ath/ath11k/mac.c
 +++ b/drivers/net/wireless/ath/ath11k/mac.c
-@@ -3981,7 +3981,16 @@
- 	if (ret)
- 		return ret;
- 
-+	/* 解决 STA 模式下 GTK 重密钥超时导致 AP 踢人的问题 */
-+	if (arvif->vdev_type == WMI_VDEV_TYPE_STA && cmd == SET_KEY &&
-+	    !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE)) {
-+		ath11k_dbg(arvif->ar->ab, ATH11K_DBG_MAC, "async STA GTK SET_KEY, bypassing wait vdev %d\n", arvif->vdev_id);
-+		/* 不等固件超时，直接返回成功，让 mac80211 瞬间回复 AP 确认帧 */
-+		/* 避免 AP 等待超时后重发 4 次并因 Reason 16 踢人 */
-+		return 0;
-+	}
-+
- 	if (!wait_for_completion_timeout(&ar->install_key_done, 1 * HZ))
- 		return -ETIMEDOUT;
- 
- 	return ar->install_key_status ? -EINVAL : 0;
-@@ -4105,6 +4114,40 @@
+@@ -4105,6 +4105,40 @@
  	return 0;
  }
  
@@ -70,32 +53,18 @@
  static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
  				 struct ieee80211_vif *vif, struct ieee80211_sta *sta,
  				 struct ieee80211_key_conf *key)
-@@ -4251,10 +4294,32 @@
+@@ -4251,10 +4285,16 @@
  		if (!time_left)
  			ath11k_warn(ab, "disassociation tx completion timeout %pM\n",
  				    sta->addr);
  	}
  
-+	/*
-+	 * 解决 GTK 重密钥时的固件死锁与丢包问题：
-+	 * 上游 mac80211 在重密钥时会下发 DISABLE_KEY + SET_KEY。
-+	 * STA模式下，禁用 DISABLE_KEY 让 SET_KEY 直接覆盖，避免死锁。
-+	 */
-+	if (cmd == DISABLE_KEY && !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE)) {
-+		/* STA 模式：直接跳过删除，由后续 SET_KEY 覆盖 */
-+		if (vif->type == NL80211_IFTYPE_STATION) {
-+			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in STA mode for rekey vdev %d\n", arvif->vdev_id);
-+			ret = 0;
-+			goto exit;
-+		}
-+
-+		/* AP 模式：仅当没有站点连接时允许清除，否则跳过并标记等待重装 */
-+		if (vif->type == NL80211_IFTYPE_AP && arvif->num_stations) {
-+			ath11k_dbg(ab, ATH11K_DBG_MAC, "skip DISABLE_KEY in AP mode vdev %d\n", arvif->vdev_id);
-+			arvif->reinstall_group_keys = true;
-+			ret = 0;
-+			goto exit;
-+		}
++	/* STA 模式重密钥时，强制睡眠 100ms，给底层固件留出清理旧密钥的时间 */
++	if (arvif->vdev_type == WMI_VDEV_TYPE_STA && 
++	    cmd == SET_KEY && 
++	    !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE)) {
++		ath11k_dbg(ab, ATH11K_DBG_MAC, "sleep 100ms for STA GTK SET_KEY vdev %d\n", arvif->vdev_id);
++		msleep(100);
 +	}
 +
  	ret = ath11k_install_key(arvif, key, cmd, peer_addr, flags);
@@ -103,7 +72,7 @@
  		ath11k_warn(ab, "ath11k_install_key failed (%d)\n", ret);
  		goto exit;
  	}
-@@ -5231,6 +5296,7 @@
+@@ -5231,6 +5271,7 @@
  		return -ENOBUFS;
  
  	ar->num_stations++;
@@ -111,7 +80,7 @@
  
  	return 0;
  }
-@@ -5246,6 +5312,8 @@
+@@ -5246,6 +5287,8 @@
  		return;
  
  	ar->num_stations--;
@@ -120,7 +89,7 @@
  }
  
  static u32 ath11k_mac_ieee80211_sta_bw_to_wmi(struct ath11k *ar,
-@@ -5297,7 +5365,18 @@
+@@ -5297,7 +5340,18 @@
  		goto exit;
  	}
  
