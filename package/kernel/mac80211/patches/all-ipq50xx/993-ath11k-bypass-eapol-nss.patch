@@ -1,0 +1,42 @@
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -5720,6 +5720,7 @@
+ 	u16 frm_type = 0;
+ 	u8 tid, *qos_ctl;
+ 	bool noack = false;
++	bool bypass_nss = false;
+ 	int ret;
+ 	u64 adjusted_tsf;
+ 
+@@ -5744,7 +5745,28 @@
+ 		if (noack)
+ 			skb_cb->flags |= ATH11K_SKB_F_NOACK_TID;
+ 	}
+ 
++	/*
++	 * 解决 160MHz 下 NSS 硬件队列拥堵导致 GTK 重密钥确认包发不出去，
++	 * 被 AP 判定超时踢下线的问题。
++	 * 精准拦截 EAPOL 握手包，绕开拥堵的 NSS 通道，直接走 CPU 的 DP 通道。
++	 */
++	if (ar->ab->nss.enabled) {
++		if (skb->len >= 14 &&
++		    ((u8 *)skb->data)[12] == 0x88 && ((u8 *)skb->data)[13] == 0x8e) {
++			bypass_nss = true;
++		} else if (!(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) &&
++			   ieee80211_is_data_qos(hdr->frame_control)) {
++			u8 *llc = skb->data + ieee80211_hdrlen(hdr->frame_control) + 2;
++			if (skb->len >= (llc - skb->data) + 8 &&
++			    llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03 &&
++			    llc[6] == 0x88 && llc[7] == 0x8e) {
++				bypass_nss = true;
++			}
++		}
++		if (bypass_nss)
++			ath11k_dbg(ar->ab, ATH11K_DBG_MAC, "bypass EAPOL to CPU TX path\n");
++	}
++
+-	if (ar->ab->nss.enabled)
++	if (ar->ab->nss.enabled && !bypass_nss)
+ 		ret = ath11k_nss_tx(arvif, skb);
+ 	else if (info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP)
+ 		ret = ath11k_dp_tx_simple(ar, arvif, skb,
